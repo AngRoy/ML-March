@@ -17,7 +17,8 @@ import {
     getDownloadURL 
 } from './firebase-config.js';
 
-import { showToast, updateAuthUI } from './ui.js';
+import { showToast, updateAuthUI, showWebsiteContent, showDashboard } from './ui.js';
+import { userAPI, sessionAPI } from './api-service.js';
 
 // Current user storage
 let currentUser = null;
@@ -35,6 +36,33 @@ async function handleAuthStateChange(user) {
                 checkUserProfile(user.uid),
                 new Promise((resolve) => setTimeout(() => resolve(null), 5000))
             ]);
+            
+            // Sync with Streamlit backend if user data exists
+            if (userData) {
+                try {
+                    // Prepare data for backend sync
+                    const backendData = {
+                        email: user.email,
+                        first_name: userData.firstName || '',
+                        last_name: userData.lastName || '',
+                        phone: userData.phone || '',
+                        institution: userData.institution || '',
+                        bio: userData.bio || '',
+                        education_level: userData.educationLevel || '',
+                        ml_experience: userData.mlExperience || '',
+                        interests: userData.interests || '',
+                        firebase_uid: user.uid,
+                        is_profile_complete: userData.isProfileComplete || false
+                    };
+                    
+                    // Sync with backend
+                    console.log("Syncing user with backend:", backendData);
+                    await userAPI.syncUser(backendData);
+                } catch (err) {
+                    console.error("Error syncing with backend:", err);
+                    // Continue anyway - Firebase is our primary auth source
+                }
+            }
             
             // Update UI
             updateAuthUI(user, userData);
@@ -100,6 +128,20 @@ async function handleGoogleSignIn(redirectToDashboard = true) {
             };
             
             await createUserProfile(user.uid, userData);
+            
+            // Also create in Streamlit backend
+            try {
+                await userAPI.saveUser({
+                    email: user.email,
+                    first_name: firstName,
+                    last_name: lastName,
+                    firebase_uid: user.uid,
+                    is_profile_complete: false
+                });
+            } catch (err) {
+                console.error("Error creating user in backend:", err);
+                // Continue anyway - Firebase is our primary user store
+            }
         }
         
         // Close modals
@@ -195,11 +237,40 @@ async function createUserProfile(uid, userData) {
 async function updateUserProfile(uid, userData) {
     try {
         console.log("Updating user profile for UID:", uid, "with data:", userData);
+        
+        // Update in Firebase
         await updateDoc(doc(db, 'users', uid), {
             ...userData,
             updatedAt: serverTimestamp()
         });
-        console.log("User profile updated successfully");
+        console.log("User profile updated successfully in Firebase");
+        
+        // Update in Streamlit backend
+        if (currentUser && currentUser.email) {
+            try {
+                // Convert Firebase format to backend format
+                const backendData = {
+                    email: currentUser.email,
+                    first_name: userData.firstName || '',
+                    last_name: userData.lastName || '',
+                    phone: userData.phone || '',
+                    institution: userData.institution || '',
+                    bio: userData.bio || '',
+                    education_level: userData.educationLevel || '',
+                    ml_experience: userData.mlExperience || '',
+                    interests: userData.interests || '',
+                    is_profile_complete: userData.isProfileComplete || false
+                };
+                
+                console.log("Updating user in backend:", backendData);
+                await userAPI.saveUser(backendData);
+                console.log("User profile updated successfully in backend");
+            } catch (err) {
+                console.error("Error updating profile in backend:", err);
+                // Continue anyway - Firebase is our source of truth
+            }
+        }
+        
         return true;
     } catch (error) {
         console.error('Error updating user profile:', error);
@@ -227,6 +298,19 @@ async function uploadProfilePicture(uid, file) {
             updatedAt: serverTimestamp()
         });
         
+        // Also update in Streamlit backend
+        if (currentUser && currentUser.email) {
+            try {
+                await userAPI.saveUser({
+                    email: currentUser.email,
+                    photo_url: downloadURL
+                });
+            } catch (err) {
+                console.error("Error updating photo URL in backend:", err);
+                // Continue anyway - Firebase is primary
+            }
+        }
+        
         return downloadURL;
     } catch (error) {
         console.error('Error uploading profile picture:', error);
@@ -244,7 +328,7 @@ async function handleProfileCompletion(formData) {
         // Get existing user data
         const userData = await checkUserProfile(currentUser.uid);
         
-        // Update user profile
+        // Update user profile in Firebase
         const updatedUserData = {
             ...userData,
             ...formData,
@@ -289,6 +373,70 @@ async function handleProfileUpdate(formData) {
     }
 }
 
+// Register user for a session
+async function registerForSession(sessionId) {
+    try {
+        if (!currentUser) {
+            throw new Error('User not authenticated');
+        }
+        
+        console.log(`Registering user for session: ${sessionId}`);
+        
+        // Register in backend
+        await sessionAPI.registerForSession(currentUser.email, sessionId);
+        
+        showToast('success', 'Success', 'Successfully registered for session!');
+        return true;
+    } catch (error) {
+        console.error('Error registering for session:', error);
+        
+        if (error.message === 'Already registered for this session') {
+            showToast('info', 'Already Registered', 'You are already registered for this session.');
+        } else {
+            showToast('error', 'Registration Failed', error.message || 'Failed to register for session.');
+        }
+        
+        throw error;
+    }
+}
+
+// Unregister user from a session
+async function unregisterFromSession(sessionId) {
+    try {
+        if (!currentUser) {
+            throw new Error('User not authenticated');
+        }
+        
+        console.log(`Unregistering user from session: ${sessionId}`);
+        
+        // Unregister in backend
+        await sessionAPI.unregisterFromSession(currentUser.email, sessionId);
+        
+        showToast('success', 'Success', 'Successfully unregistered from session!');
+        return true;
+    } catch (error) {
+        console.error('Error unregistering from session:', error);
+        showToast('error', 'Unregistration Failed', error.message || 'Failed to unregister from session.');
+        throw error;
+    }
+}
+
+// Get user's registered sessions
+async function getUserSessions() {
+    try {
+        if (!currentUser) {
+            throw new Error('User not authenticated');
+        }
+        
+        console.log('Getting user sessions');
+        return await sessionAPI.getUserSessions(currentUser.email);
+    } catch (error) {
+        console.error('Error getting user sessions:', error);
+        showToast('error', 'Error', 'Failed to load your sessions.');
+        throw error;
+    }
+}
+
 // Initialize authentication listeners
 function initAuth() {
     // Set up auth state observer
@@ -307,5 +455,8 @@ export {
     handleProfileUpdate,
     uploadProfilePicture,
     checkUserProfile,
+    registerForSession,
+    unregisterFromSession,
+    getUserSessions,
     currentUser
 };

@@ -18,6 +18,17 @@ function initApp() {
     // Initialize event handlers
     initEvents();
     
+    // Hide loader after initialization is complete
+    setTimeout(() => {
+        const loader = document.querySelector('.loader-wrapper');
+        if (loader) {
+            loader.style.opacity = '0';
+            setTimeout(() => {
+                loader.style.display = 'none';
+            }, 500);
+        }
+    }, 1500);
+    
     console.log('ML March application initialized successfully');
 }
 
